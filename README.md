@@ -46,6 +46,10 @@ struct Student {
 
 ## 🚀 사용 방법
 
+```bash
+git clone https://github.com/jiwoong5/filesystem4.git
+```
+
 ### Linux/Mac
 
 ```bash
