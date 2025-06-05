@@ -38,7 +38,7 @@ struct Student {
 
 ### B+ Tree 설정
 
-* **차수 (DEGREE)**: 3 (Internal/Leaf 노드는 가장 2개의 키 가지면 됩)
+* **차수 (DEGREE)**: 3 (Internal/Leaf 노드는 최대 2개의 키 가짐)
 * **블록 크기**: 4096KB
 * **인덱스 키**: `score` (float)
 
