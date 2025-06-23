@@ -1,38 +1,99 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
-#include <map>
+#include <cstring>
+#include <string>
 using namespace std;
 
-const int DEGREE = 3;  // B+Tree 차수 (최대 키 수 = DEGREE - 1)
+const int BLOCK_SIZE = 4096;
+const int DEGREE = 3;
 
 #pragma pack(push, 1)
 struct Student {
     unsigned ID;
-    char name[20];      // null-terminated 아님
+    char name[20]; // null-terminated 아님
     float score;
     unsigned advisorID;
 };
 #pragma pack(pop)
 
+const int STUDENT_SIZE = sizeof(Student);
+const int STUDENTS_PER_BLOCK = BLOCK_SIZE / STUDENT_SIZE;
+
+char studentBlock[BLOCK_SIZE];
+
+void stringToCharArray(const string& str, char* arr, int maxLen) {
+    int copyLen = min((int)str.length(), maxLen);
+    memcpy(arr, str.c_str(), copyLen);
+    if (copyLen < maxLen) {
+        memset(arr + copyLen, 0, maxLen - copyLen);
+    }
+}
+
+bool insertStudent(string name, unsigned ID, float score, unsigned advisorID) {
+    ifstream checkFile("student.dat", ios::binary);
+    if (checkFile.is_open()) {
+        checkFile.seekg(0, ios::end);
+        int studentCount = checkFile.tellg() / STUDENT_SIZE;
+        checkFile.seekg(0, ios::beg);
+
+        int blocks = (studentCount + STUDENTS_PER_BLOCK - 1) / STUDENTS_PER_BLOCK;
+        for (int b = 0; b < blocks; ++b) {
+            checkFile.read(studentBlock, BLOCK_SIZE);
+            Student* students = (Student*)studentBlock;
+            int count = min(STUDENTS_PER_BLOCK, studentCount - b * STUDENTS_PER_BLOCK);
+            for (int i = 0; i < count; ++i) {
+                if (students[i].ID == ID) {
+                    checkFile.close();
+                    return false;
+                }
+            }
+        }
+        checkFile.close();
+    }
+
+    Student s;
+    s.ID = ID;
+    stringToCharArray(name, s.name, 20);
+    s.score = score;
+    s.advisorID = advisorID;
+
+    ofstream out("student.dat", ios::binary | ios::app);
+    if (!out) return false;
+    out.write((char*)&s, STUDENT_SIZE);
+    out.close();
+    return true;
+}
+
+bool parseStudentLine(const string& line, string& name, unsigned& ID, float& score, unsigned& advisorID) {
+    istringstream iss(line);
+    string token;
+    if (!(iss >> token)) return false;
+    if (isdigit(token[0])) {
+        ID = stoul(token);
+        if (!(iss >> name >> score >> advisorID)) return false;
+    } else {
+        name = token;
+        if (!(iss >> ID >> score >> advisorID)) return false;
+    }
+    return true;
+}
+
 struct BPlusNode {
     bool isLeaf;
     vector<float> keys;
-    vector<BPlusNode*> children;     // Internal node용
-    vector<int> values;              // Leaf node용 (레코드 위치 등)
-    BPlusNode* next;                 // Leaf 노드 전용 (순차접근)
-
+    vector<BPlusNode*> children;
+    vector<int> values;
+    BPlusNode* next;
     BPlusNode(bool leaf) : isLeaf(leaf), next(nullptr) {}
 };
 
 class BPlusTree {
     BPlusNode* root;
-
 public:
-    BPlusTree() {
-        root = new BPlusNode(true);
-    }
+    BPlusTree() { root = new BPlusNode(true); }
 
     void insert(float key, int value) {
         if (root->keys.size() == DEGREE - 1) {
@@ -44,103 +105,51 @@ public:
         insertNonFull(root, key, value);
     }
 
+    void saveToFile(const string& filename) {
+        ofstream fout(filename, ios::binary);
+        vector<pair<float, int>> allData;
+        collectAllData(root, allData);
+        int count = allData.size();
+        fout.write((char*)&count, sizeof(int));
+        for (auto& [k, v] : allData) {
+            fout.write((char*)&k, sizeof(float));
+            fout.write((char*)&v, sizeof(int));
+        }
+    }
+
+    static BPlusTree* loadFromFile(const string& filename) {
+        ifstream fin(filename, ios::binary);
+        if (!fin.is_open()) return nullptr;
+        BPlusTree* tree = new BPlusTree();
+        int count;
+        fin.read((char*)&count, sizeof(int));
+        for (int i = 0; i < count; ++i) {
+            float k;
+            int v;
+            fin.read((char*)&k, sizeof(float));
+            fin.read((char*)&v, sizeof(int));
+            tree->insert(k, v);
+        }
+        return tree;
+    }
+
     int searchRangeWithKeys(float minKey, float maxKey) {
-        int result = 0;
         BPlusNode* node = root;
-
-        // 루트가 null인지 확인
-        if (!node) return 0;
-
-        // 첫 번째 리프 노드 찾기
         while (!node->isLeaf) {
             int i = 0;
             while (i < node->keys.size() && minKey >= node->keys[i]) i++;
-            if (i >= node->children.size()) {
-                return 0; // 안전장치
-            }
             node = node->children[i];
-            if (!node) return 0; // null 체크
         }
 
-        // 리프 노드들을 순회하며 범위 내 키 카운트
+        int result = 0;
         while (node) {
             for (int i = 0; i < node->keys.size(); ++i) {
-                if (node->keys[i] > maxKey)
-                    return result;
-                if (node->keys[i] >= minKey)
-                    result++;
+                if (node->keys[i] > maxKey) return result;
+                if (node->keys[i] >= minKey) result++;
             }
             node = node->next;
         }
         return result;
-    }
-
-    // 트리를 파일로 저장 (단순화된 버전)
-    void saveToFile(const string& filename) {
-        ofstream fout(filename, ios::binary);
-        if (!fout.is_open()) {
-            cerr << "인덱스 파일을 생성할 수 없습니다: " << filename << endl;
-            return;
-        }
-
-        // 단순히 모든 리프 노드의 키-값 쌍만 저장
-        vector<pair<float, int>> allData;
-        collectAllData(root, allData);
-
-        // 데이터 개수 저장
-        int dataCount = allData.size();
-        fout.write(reinterpret_cast<const char*>(&dataCount), sizeof(int));
-
-        // 모든 키-값 쌍 저장
-        for (const auto& [key, value] : allData) {
-            fout.write(reinterpret_cast<const char*>(&key), sizeof(float));
-            fout.write(reinterpret_cast<const char*>(&value), sizeof(int));
-        }
-
-        fout.close();
-        cout << "인덱스 파일이 성공적으로 저장되었습니다: " << filename << endl;
-    }
-
-    // 파일에서 트리 로드 (단순화된 버전)
-    static BPlusTree* loadFromFile(const string& filename) {
-        ifstream fin(filename, ios::binary);
-        if (!fin.is_open()) {
-            cerr << "인덱스 파일을 열 수 없습니다: " << filename << endl;
-            return nullptr;
-        }
-
-        BPlusTree* tree = new BPlusTree();
-
-        // 데이터 개수 읽기
-        int dataCount;
-        fin.read(reinterpret_cast<char*>(&dataCount), sizeof(int));
-
-        if (dataCount <= 0) {
-            cerr << "잘못된 데이터 개수: " << dataCount << endl;
-            delete tree;
-            fin.close();
-            return nullptr;
-        }
-
-        // 모든 키-값 쌍 읽어서 새 트리에 삽입
-        for (int i = 0; i < dataCount; i++) {
-            float key;
-            int value;
-            fin.read(reinterpret_cast<char*>(&key), sizeof(float));
-            fin.read(reinterpret_cast<char*>(&value), sizeof(int));
-
-            if (fin.fail()) {
-                cerr << "파일 읽기 오류 발생" << endl;
-                delete tree;
-                fin.close();
-                return nullptr;
-            }
-
-            tree->insert(key, value);
-        }
-
-        fin.close();
-        return tree;
     }
 
 private:
@@ -157,13 +166,11 @@ private:
             sibling->values.assign(child->values.begin() + mid, child->values.end());
             child->keys.resize(mid);
             child->values.resize(mid);
-
             sibling->next = child->next;
             child->next = sibling;
         } else {
             sibling->keys.assign(child->keys.begin() + mid + 1, child->keys.end());
             sibling->children.assign(child->children.begin() + mid + 1, child->children.end());
-
             child->keys.resize(mid);
             child->children.resize(mid + 1);
         }
@@ -178,115 +185,77 @@ private:
         } else {
             int i = 0;
             while (i < node->keys.size() && key >= node->keys[i]) i++;
-
             if (node->children[i]->keys.size() == DEGREE - 1) {
                 splitChild(node, i);
-                if (key >= node->keys[i])
-                    i++;
+                if (key >= node->keys[i]) i++;
             }
             insertNonFull(node->children[i], key, value);
         }
     }
 
-    // 모든 리프 노드의 데이터를 수집
     void collectAllData(BPlusNode* node, vector<pair<float, int>>& data) {
         if (!node) return;
-
         if (node->isLeaf) {
-            for (int i = 0; i < node->keys.size(); i++) {
+            for (int i = 0; i < node->keys.size(); ++i)
                 data.push_back({node->keys[i], node->values[i]});
-            }
         } else {
-            for (BPlusNode* child : node->children) {
+            for (auto child : node->children)
                 collectAllData(child, data);
-            }
         }
     }
 };
 
-// 인덱스 파일에서 범위 검색
-int rangeSearchFromIndexFile(const string& idxFilename, float minScore, float maxScore) {
-    BPlusTree* tree = BPlusTree::loadFromFile(idxFilename);
-    if (!tree) {
-        cerr << "Failed to load B+ tree from " << idxFilename << endl;
-        return 0;
-    }
-
-    int count = tree->searchRangeWithKeys(minScore, maxScore);
-    
-    delete tree;
-    return count;
-}
-
+// 실행 메인 함수
 int main(int argc, char* argv[]) {
-    // 명령행 인수 확인
-    if (argc != 2) {
-        cerr << "사용법: " << argv[0] << " <query.txt>" << endl;
+    string inputFile = "student.txt";
+    string queryFile = "query.txt";
+
+    if (argc >= 2) inputFile = argv[1];
+    if (argc >= 3) queryFile = argv[2];
+
+    remove("student.dat");
+    ifstream in(inputFile);
+    if (!in) {
+        cerr << "학생 파일 열기 실패: " << inputFile << endl;
         return 1;
     }
 
-    string queryFile = argv[1];
-    
-    BPlusTree tree;
-    // 파일 열기
-    ifstream fin("student.dat", ios::binary);
-    if (!fin.is_open()) {
-        cerr << "student.dat 파일을 열 수 없습니다." << endl;
-        return 1;
-    }
-
-    fin.seekg(0, ios::end);
-    streampos fileSize = fin.tellg();
-    fin.seekg(0, ios::beg);
-
-    const size_t recordSize = sizeof(Student);
-    size_t recordCount = fileSize / recordSize;
-
-    cout << "총 " << recordCount << "개의 학생 레코드를 처리합니다." << endl;
-
-    for (size_t i = 0; i < recordCount; i++) {
-        streampos pos = i * recordSize;
-
-        Student s;
-        fin.seekg(pos);
-        fin.read(reinterpret_cast<char*>(&s), recordSize);
-
-        if (fin.fail()) {
-            cerr << "레코드 " << i << " 읽기 실패" << endl;
-            break;
+    string line;
+    while (getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        string name; unsigned ID, advisorID; float score;
+        if (parseStudentLine(line, name, ID, score, advisorID)) {
+            insertStudent(name, ID, score, advisorID);
         }
-
-        tree.insert(s.score, static_cast<int>(pos));
     }
-    fin.close();
+    in.close();
 
-    // 생성된 B+ 트리를 student.idx 파일로 저장
+    // 인덱스 생성
+    BPlusTree tree;
+    ifstream dat("student.dat", ios::binary);
+    dat.seekg(0, ios::end);
+    int size = dat.tellg();
+    dat.seekg(0);
+    int count = size / STUDENT_SIZE;
+    for (int i = 0; i < count; i++) {
+        Student s;
+        dat.seekg(i * STUDENT_SIZE);
+        dat.read((char*)&s, STUDENT_SIZE);
+        tree.insert(s.score, i * STUDENT_SIZE);
+    }
+    dat.close();
     tree.saveToFile("student.idx");
 
-    // query.txt 파일에서 min, max score 읽기
-    ifstream queryIn(queryFile);
-    if (!queryIn.is_open()) {
-        cerr << queryFile << " 파일을 열 수 없습니다." << endl;
-        return 1;
-    }
-
+    // 쿼리 처리
+    ifstream qf(queryFile);
+    ofstream out("result.txt");
     float minScore, maxScore;
-    if (!(queryIn >> minScore >> maxScore)) {
-        cerr << queryFile << " 파일에서 점수 범위를 읽을 수 없습니다." << endl;
-        cerr << "파일 형식: <최소점수> <최대점수>" << endl;
-        queryIn.close();
-        return 1;
+    while (qf >> minScore >> maxScore) {
+        BPlusTree* indexTree = BPlusTree::loadFromFile("student.idx");
+        int result = indexTree->searchRangeWithKeys(minScore, maxScore);
+        out << result << endl;
+        delete indexTree;
     }
-    queryIn.close();
-
-    // 범위 검색 테스트
-    string indexFile = "student.idx";
-
-    cout << "점수 범위 " << minScore << " ~ " << maxScore 
-         << " 사이의 학생을 검색합니다..." << endl;
-
-    int count = rangeSearchFromIndexFile(indexFile, minScore, maxScore);
-    cout << "조건에 맞는 학생 수: " << count << "명" << endl;
 
     return 0;
 }
